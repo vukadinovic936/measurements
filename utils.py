@@ -165,123 +165,6 @@ def process_video_with_diameter(video_path,
                                 ratio,
                                 systole_diastole_analysis: bool = False):
 
-    if video_path.endswith(".avi"):
-        input_type = "avi"
-    elif video_path.endswith(".mp4"):
-        input_type = "mp4"
-        
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-    cap.release()
-    frames_array = np.array(frames)
-
-    # Get coordinates from dataframe
-    x1 = df["pred_x1"].values
-    y1 = df["pred_y1"].values
-    x2 = df["pred_x2"].values
-    y2 = df["pred_y2"].values
-
-    delta_x = abs(x2 - x1) *ratio 
-    delta_y = abs(y2 - y1) *ratio
-    diameters = np.sqrt((delta_x * conversion_factor_X)**2 + (delta_y * conversion_factor_Y)**2)
-
-    # Smooth diameters
-    fps = 30  # Example FPS, modify as necessary
-    cutoff = bpm_to_frame_freq(window_len=len(diameters), fps=fps, bpm=140)
-    smooth_diameters = apply_lpf(diameters, cutoff)
-
-    # Create output video
-    height, width = frames_array[0].shape[:2]
-    plot_height = int(width * 0.3)  # Plot height is 30% of video width
-    output_height = height + plot_height
-    output_width = width
-
-    if input_type == "avi":
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'XVID'), fps, (output_width, output_height))
-    elif input_type == "mp4":
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (output_width, output_height))
-
-    if systole_diastole_analysis:
-        systolic_i, diastolic_i = get_systole_diastole(smooth_diameters, 
-                                                    smoothing=False, 
-                                                    kernel=[1, 2, 3, 2, 1], 
-                                                    distance= 25) #25 is default value.
-        
-        if systolic_i is None or diastolic_i is None:
-            return print("No systolic or diastolic peaks found in the diameter signal.")
-        
-        systolic_diamter = smooth_diameters[systolic_i]
-        diastolic_diamter = smooth_diameters[diastolic_i]
-        
-        #pick first pair values
-        INDEX = 0
-        systolic_frame = systolic_i[INDEX] if isinstance(systolic_i, np.ndarray) else systolic_i
-        diastolic_frame = diastolic_i[INDEX] if isinstance(diastolic_i, np.ndarray) else diastolic_i
-        systolic_diamter = systolic_diamter[INDEX] if isinstance(systolic_diamter, np.ndarray) else systolic_diamter
-        diastolic_diamter = diastolic_diamter[INDEX] if isinstance(diastolic_diamter, np.ndarray) else diastolic_diamter 
-        LVEF_by_teicholz = calculate_lvef_teicholz(diastolic_diameter= diastolic_diamter,
-                                                systolic_diameter= systolic_diamter)
-        print(f"LVEF by teicholz methods was {LVEF_by_teicholz:.3f} %")
-    
-    for i, frame in enumerate(tqdm(frames_array)):    
-        fig, ax = plt.subplots(figsize=(8, 2))
-        # ax.plot(diameters, label='Raw Diameter', alpha=0.6)
-        ax.plot(smooth_diameters, color='skyblue')
-        ax.axvline(x=i, color='black', linestyle='--', alpha=0.5)
-        
-        if systole_diastole_analysis:
-            ax.scatter(systolic_frame, systolic_diamter, color='blue',  marker='o')
-            ax.scatter(diastolic_frame, diastolic_diamter, color='red',  marker='o') 
-            
-        # ax.legend()
-        ax.set_ylim(0, max(diameters) * 1.1)
-        ax.set_xlabel('')
-        ax.set_ylabel('Diameter')
-
-        canvas = FigureCanvas(fig)
-        canvas.draw()
-        try:    
-            plot_image = np.frombuffer(canvas.tostring_rgb(), dtype='uint8')
-            plot_image = plot_image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        except Exception as e:
-            buf = canvas.buffer_rgba()
-            plot_image_rgba = np.asarray(buf)
-            plot_image = plot_image_rgba[:, :, :3] 
-            
-        plt.close(fig)
-        plot_image = cv2.resize(plot_image, (width, plot_height))
-        # Stack video frame and plot vertically
-        combined_image = np.vstack((frame, plot_image))
-
-        out.write(cv2.cvtColor(combined_image, cv2.COLOR_RGB2BGR))
-
-    out.release()
-    
-    df["diameter"] = diameters
-    df["smooth_diameter"] = smooth_diameters
-    
-    if input_type == "avi":
-        output_path_replaced = output_path.replace(".avi", ".csv")
-    elif input_type == "mp4":
-        output_path_replaced = output_path.replace(".mp4", ".csv")
-
-    df.to_csv(output_path_replaced, index=False)
-
-    print(f"Output Distance avi saved to {output_path},\n and csv saved to {output_path_replaced}")
-    
-def process_video_with_diameter_tv(video_path, 
-                                output_path, 
-                                df, 
-                                conversion_factor_X,
-                                conversion_factor_Y,
-                                ratio,
-                                systole_diastole_analysis: bool = False):
-
     cap = cv2.VideoCapture(video_path)
     frames_bgr = [] # Collect frames as BGR from cv2.VideoCapture
     while True:
@@ -400,6 +283,8 @@ def process_video_with_diameter_tv(video_path,
     df["diameter"] = diameters
     df["smooth_diameter"] = smooth_diameters
     df.to_csv(output_path.replace(".mp4", ".csv"), index=False)
+    
+    print(f"Output Distance video saved to {output_path},\n and csv saved to {output_path.replace('.mp4', '.csv')}")
     
     if systole_diastole_analysis:
         return LVEF_by_teicholz

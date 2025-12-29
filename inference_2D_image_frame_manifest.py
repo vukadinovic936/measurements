@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 """
 This script is for 2D frame-to-frame inference  with a directory which containes many Doppler Dicoms . 
-The input is video files (AVI or DICOM) and the output is video files (AVI) with the predicted frame-to-frame annotation and metadata. 
+The input is video files (AVI, MP4, or DICOM) and the output is video files (MP4) with the predicted frame-to-frame annotation and metadata. 
 """
 
 #Configuration
@@ -29,9 +29,9 @@ parser.add_argument("--model_weights", type=str, required = True, choices=[
             "pa",
             "ivc",
         ])
-parser.add_argument("--folders", type=str, required = True, help= "Path to the video file folders (both AVI and DICOM)")
+parser.add_argument("--folders", type=str, required = True, help= "Path to the video file folders (AVI, MP4, or DICOM)")
 parser.add_argument("--manifest_with_frame", type=str, required = True)
-parser.add_argument("--output_path_folders", type=str, help= "Output folders Defalut AVI and metadata")
+parser.add_argument("--output_path_folders", type=str, help= "Output folders for MP4 videos and metadata")
 args = parser.parse_args()
 
 #Configuration
@@ -59,7 +59,7 @@ def forward_pass(inputs):
         order="XY"
     )
     return predictions
-print("Please ensure that all file extensions in the folder are unified to either .dcm or .avi. Do not combine.")
+print("Please ensure that all file extensions in the folder are unified to either .dcm, .mp4, or .avi. Do not combine.")
 print("Note: This script is for 2D frame-to-frame inference.\nOur model used the video with height of 480 and width of 640, respectively.")
 
 # MODEL LOADING
@@ -90,8 +90,8 @@ for VIDEO_FILE in tqdm(VIDEO_FILES):
         results_one_file =[]
         frames = []
         
-        #Version AVI, LOAD VIDEO (AVI).
-        if VIDEO_FILE.endswith(".avi"):
+        #Version VIDEO, LOAD VIDEO (AVI/MP4).
+        if VIDEO_FILE.endswith(".avi") or VIDEO_FILE.endswith(".mp4"):
             video = cv2.VideoCapture(VIDEO_FILE)
             while True:
                 ret, frame = video.read()

@@ -11,6 +11,7 @@ from argparse import ArgumentParser
 
 import torch
 from torchvision.models.segmentation import deeplabv3_resnet50
+import torchvision
 
 # For DICOM support
 import pydicom
@@ -274,7 +275,7 @@ def create_volume_curve_video(frames: list,
         predictions: Segmentation masks for each frame (F, H, W)
         volumes: LA volume array for each frame
         la_lengths: List of LA length info per frame [(p_start, p_end, length_cm, angle), ...]
-        output_path: Path to save output video
+        output_path: Path to save output video (.mp4)
         max_volume_indices: Indices of maximum volume frames (end-systole)
         min_volume_indices: Indices of minimum volume frames (end-diastole)
         fps: Output video frame rate
@@ -290,16 +291,11 @@ def create_volume_curve_video(frames: list,
     output_height = height + plot_height
     output_width = width
     
-    # Determine output format
-    if output_path.endswith('.mp4'):
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    elif output_path.endswith('.avi'):
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    else:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        output_path += '.mp4'
+    # Ensure output path is .mp4
+    if not output_path.endswith('.mp4'):
+        output_path = output_path.rsplit('.', 1)[0] + '.mp4'
     
-    out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+    combined_frames_list = []
     
     for i, frame in enumerate(tqdm(frames, desc="Creating volume curve video with AI inference")):
         # Convert frame to RGB if needed
@@ -407,10 +403,18 @@ def create_volume_curve_video(frames: list,
         # Stack video frame and plot vertically
         combined_image = np.vstack((frame_uint8, plot_image))
         
-        # Write frame
-        out.write(cv2.cvtColor(combined_image, cv2.COLOR_RGB2BGR))
+        # Collect frame
+        combined_frames_list.append(torch.from_numpy(combined_image))
     
-    out.release()
+    # Write video using torchvision
+    if combined_frames_list:
+        video_tensor = torch.stack(combined_frames_list)  # (F, H, W, C)
+        torchvision.io.write_video(
+            filename=output_path,
+            video_array=video_tensor,
+            fps=fps,
+            video_codec='libx264'
+        )
     print(f"Volume curve video with inference saved to: {output_path}")
 
 #################################################################################

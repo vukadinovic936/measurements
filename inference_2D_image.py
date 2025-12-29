@@ -5,6 +5,7 @@ from argparse import ArgumentParser
 
 import torch
 from torchvision.models.segmentation import deeplabv3_resnet50
+import torchvision
 
 import cv2
 import pydicom
@@ -14,7 +15,7 @@ from utils import segmentation_to_coordinates, process_video_with_diameter, get_
 
 """
 This file is for 2D frame-to-frame inference.
-The input is a video file (AVI or DICOM) and the output is a video file (AVI) with the predicted frame-to-frame annotation.
+The input is a video file (AVI, MP4, or DICOM) and the output is a video file (MP4) with the predicted frame-to-frame annotation.
 
 Disclaimer: Please include the appropriate view corresponding to the measurement item. 
 (For example, LVID is typically measured in the PLAX view and not in A4C or PSAX. 
@@ -34,8 +35,8 @@ parser.add_argument("--model_weights", type=str, required = True, choices=[
             "pa",
             "ivc",
         ])
-parser.add_argument("--file_path", type=str, required = True, help= "Path to the video file (both AVI and DICOM)")
-parser.add_argument("--output_path", type=str, required = True, help= "Output. Defalut should be AVI")
+parser.add_argument("--file_path", type=str, required = True, help= "Path to the video file (AVI, MP4, or DICOM)")
+parser.add_argument("--output_path", type=str, required = True, help= "Output path. Must be .mp4")
 parser.add_argument("--phase_estimate", action='store_true', help="Estimate systole and diastole phase from the video. Default is False.")
 args = parser.parse_args()
 
@@ -67,13 +68,15 @@ print(f"Note: This script is for 2D frame-to-frame inference. {args.model_weight
 input_type = None
 VIDEO_FILE = args.file_path
 
-if VIDEO_FILE.endswith(".avi"): input_type = "avi"
-elif VIDEO_FILE.endswith(".dcm"): input_type = "dcm"
+if VIDEO_FILE.endswith(".avi") or VIDEO_FILE.endswith(".mp4"): 
+    input_type = "video"
+elif VIDEO_FILE.endswith(".dcm"): 
+    input_type = "dcm"
 
 if input_type is None:
-    raise ValueError("File path must be either .avi or .dcm")
-if not args.output_path.endswith(".avi"):
-    raise ValueError("Output path must be .avi")
+    raise ValueError("File path must be either .avi, .mp4, or .dcm")
+if not args.output_path.endswith(".mp4"):
+    raise ValueError("Output path must be .mp4")
 
 # MODEL LOADING
 device = "cuda:0" #cpu / cuda
@@ -86,14 +89,23 @@ backbone = backbone.to(device)
 backbone.eval()
 
 frames = []
-#Version AVI, LOAD VIDEO (AVI).
-if input_type == "avi":
+#Version VIDEO, LOAD VIDEO (AVI/MP4).
+if input_type == "video":
     video = cv2.VideoCapture(VIDEO_FILE)
+    if not video.isOpened():
+        raise ValueError(f"Failed to open video file: {VIDEO_FILE}")
+    
     while True:
         ret, frame = video.read()
         if not ret:
             break
-        frames.append(frame)
+        resized_frame = cv2.resize(frame, (640, 480))
+        frames.append(resized_frame)
+    video.release()
+    
+    if len(frames) == 0:
+        raise ValueError(f"No frames were loaded from video file: {VIDEO_FILE}")
+    
     frames = np.array(frames)
 
 #Version DICOM, LOAD VIDEO (Dicom).
@@ -120,6 +132,12 @@ elif input_type == "dcm":
         frames.append(resized_frame)
 
 input_tensor = torch.tensor(frames)
+print(f"Input tensor shape after conversion: {input_tensor.shape}")
+
+if input_tensor.dim() != 4:
+    raise ValueError(f"Expected 4D tensor (frames, height, width, channels), but got {input_tensor.dim()}D tensor with shape {input_tensor.shape}. "
+                     f"This usually means the video frames were not loaded properly.")
+
 input_tensor = input_tensor.float() / 255.0
 input_tensor = input_tensor.to(device)
 input_tensor = input_tensor.permute(0, 3, 1, 2)  # (F, C, H, W)
@@ -136,17 +154,9 @@ predictions = predictions.cpu().numpy()
 
 #Make Output Video
 output_video_path = args.output_path
-out_avi = cv2.VideoWriter(
-            output_video_path,
-            cv2.VideoWriter_fourcc(*"XVID"),
-            30, #FPS defult
-            (batch["inputs"].shape[-1], batch["inputs"].shape[-2]),  # Width, Height
-        )
-
-if not out_avi.isOpened():
-    raise ValueError("Error: VideoWriter failed to open.")
 
 frame_number, pred_x1s, pred_y1s, pred_x2s, pred_y2s =[], [], [], [], []
+video_frames = []
   
 for i, (frame, prediction) in enumerate(zip(input_tensor, predictions)):
     frame = frame.permute(1, 2, 0).cpu().numpy()
@@ -171,9 +181,16 @@ for i, (frame, prediction) in enumerate(zip(input_tensor, predictions)):
     pred_y2s.append(prediction[1][1])
     frame_number.append(i)
     
-    out_avi.write(frame)
-    
-out_avi.release()
+    video_frames.append(torch.from_numpy(frame))
+
+# Write video using torchvision
+video_tensor = torch.stack(video_frames)  # (F, H, W, C)
+torchvision.io.write_video(
+    filename=output_video_path,
+    video_array=video_tensor,
+    fps=30,
+    video_codec='libx264'
+)
 print(f"Done, please check {output_video_path}")
 
 df = pd.DataFrame({
@@ -184,10 +201,10 @@ df = pd.DataFrame({
     "pred_y2": pred_y2s,
 })
 
-df.to_csv(output_video_path.replace(".avi", ".csv"), index=False)
+df.to_csv(output_video_path.replace(".mp4", ".csv"), index=False)
 
-if input_type == "avi":
-    print("Completed. Distance between two points is not calculated from .avi input.")
+if input_type == "video":
+    print("Completed. Distance between two points is not calculated from video input.")
 
 if input_type == "dcm":
     
@@ -197,7 +214,7 @@ if input_type == "dcm":
         systole_diastole_analysis = False
          
     process_video_with_diameter(video_path = output_video_path, 
-                                output_path = output_video_path.replace(".avi", "_distance.avi"),
+                                output_path = output_video_path.replace(".mp4", "_distance.mp4"),
                                 conversion_factor_X = conversion_factor_X,
                                 conversion_factor_Y = conversion_factor_Y,
                                 df = df,
@@ -205,45 +222,45 @@ if input_type == "dcm":
                                 systole_diastole_analysis = systole_diastole_analysis
                                 )
     print("Distance between two points is calculated from .dcm input.")
-    print(f"Completed.Please check {output_video_path.replace('.avi', '_distance.avi')}")
+    print(f"Completed.Please check {output_video_path.replace('.mp4', '_distance.mp4')}")
 
 #SAMPLE SCRIPT
 
 #python inference_2D_image.py --model_weights "ivs" 
 #--file_path "./SAMPLE_DICOM/IVS_SAMPLE_0.dcm" 
-#--output_path "./OUTPUT/AVI/IVS_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/IVS_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "lvid" 
 #--file_path "./SAMPLE_DICOM/LVID_SAMPLE_0.dcm" 
-#--output_path "./OUTPUT/AVI/LVID_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/LVID_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "lvpw"
 #--file_path "./SAMPLE_DICOM/LVPW_SAMPLE_0.dcm"
-#--output_path "./OUTPUT/AVI/LVPW_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/LVPW_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "aorta"
 #--file_path "./SAMPLE_DICOM/AORTA_SAMPLE_0.dcm"
-#--output_path "./OUTPUT/AVI/AORTA_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/AORTA_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "aortic_root"
 #--file_path "./SAMPLE_DICOM/AORTIC_ROOT_SAMPLE_0.dcm"
-#--output_path "./OUTPUT/AVI/AORTIC_ROOT_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/AORTIC_ROOT_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "la"
 #--file_path "./SAMPLE_DICOM/LA_SAMPLE_0.dcm"
-#--output_path "./OUTPUT/AVI/LA_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/LA_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "rv_base"
 #--file_path "./SAMPLE_DICOM/RV_BASE_SAMPLE_0.dcm"
-#--output_path "./OUTPUT/AVI/RV_BASE_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/RV_BASE_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "pa"
 #--file_path "./SAMPLE_DICOM/PA_SAMPLE_0.dcm"
-#--output_path "./OUTPUT/AVI/PA_SAMPLE_GENERATED.avi"
+#--output_path "./OUTPUT/MP4/PA_SAMPLE_GENERATED.mp4"
 
 #python inference_2D_image.py --model_weights "ivc"
 #--file_path "./SAMPLE_DICOM/IVC_SAMPLE_0.dcm" 
-#--output_path "./OUTPUT/AVI/IVC_SAMPLE_GENERATED.avi" 
+#--output_path "./OUTPUT/MP4/IVC_SAMPLE_GENERATED.mp4" 
 
 
 

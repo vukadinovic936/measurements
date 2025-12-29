@@ -2,6 +2,7 @@ from pathlib import Path
 import torch
 import pandas as pd
 from torchvision.models.segmentation import deeplabv3_resnet50
+import torchvision
 import cv2
 import numpy as np
 from argparse import ArgumentParser
@@ -13,7 +14,7 @@ from tqdm import tqdm
 
 """
 This script is for 2D frame-to-frame inference  with a directory which containes many Doppler Dicoms . 
-The input is video files (AVI or DICOM) and the output is video files (AVI) with the predicted frame-to-frame annotation and metadata. 
+The input is video files (AVI, MP4, or DICOM) and the output is video files (MP4) with the predicted frame-to-frame annotation and metadata. 
 
 Disclaimer: Please include the appropriate view corresponding to the measurement item. 
 (For example, LVID is typically measured in the PLAX view and not in A4C or PSAX. 
@@ -33,8 +34,8 @@ parser.add_argument("--model_weights", type=str, required = True, choices=[
             "pa",
             "ivc",
         ])
-parser.add_argument("--folders", type=str, required = True, help= "Path to the video file folders (both AVI and DICOM)")
-parser.add_argument("--output_path_folders", type=str, help= "Output folders Defalut AVI and metadata")
+parser.add_argument("--folders", type=str, required = True, help= "Path to the video file folders (AVI, MP4, or DICOM)")
+parser.add_argument("--output_path_folders", type=str, help= "Output folders for MP4 videos and metadata")
 args = parser.parse_args()
 
 #Configuration
@@ -63,11 +64,11 @@ def forward_pass(inputs):
         order="XY"
     )
     return predictions
-print("Please ensure that all file extensions in the folder are unified to either .dcm or .avi. Do not combine.")
+print("Please ensure that all file extensions in the folder are unified to either .dcm, .mp4, or .avi. Do not combine.")
 print("Note: This script is for 2D frame-to-frame inference.\nOur model used the video with height of 480 and width of 640, respectively.")
 
 
-def check_extensions_uniformity(folder_path, allowed_extensions = ['.dcm', '.avi']):
+def check_extensions_uniformity(folder_path, allowed_extensions = ['.dcm', '.mp4', '.avi']):
     """
     Checks if all files in the folder have extensions that are uniformly one of the allowed extensions.
     """
@@ -87,7 +88,7 @@ def check_extensions_uniformity(folder_path, allowed_extensions = ['.dcm', '.avi
         print("Files have mixed extensions or invalid extensions:", extensions_found)
         return False
 
-check_extensions_uniformity(folder_path = args.folders, allowed_extensions = ['.dcm', '.avi'])
+check_extensions_uniformity(folder_path = args.folders, allowed_extensions = ['.dcm', '.mp4', '.avi'])
 
 # MODEL LOADING
 device = "cuda:0" #cpu / cuda
@@ -110,7 +111,7 @@ if args.output_path_folders:
 results_all_files =[]
 
 #LOAD DICOM IMAGE with DOPPLER REGION
-VIDEO_FILES = [os.path.join(args.folders, f) for f in os.listdir(args.folders) if f.endswith(".dcm") or f.endswith(".avi")]
+VIDEO_FILES = [os.path.join(args.folders, f) for f in os.listdir(args.folders) if f.endswith(".dcm") or f.endswith(".avi") or f.endswith(".mp4")]
 
 #using tqdm
 for VIDEO_FILE in tqdm(VIDEO_FILES):
@@ -118,8 +119,8 @@ for VIDEO_FILE in tqdm(VIDEO_FILES):
         results_one_file =[]
         frames = []
         
-        #Version AVI, LOAD VIDEO (AVI).
-        if VIDEO_FILE.endswith(".avi"):
+        #Version VIDEO, LOAD VIDEO (AVI/MP4).
+        if VIDEO_FILE.endswith(".avi") or VIDEO_FILE.endswith(".mp4"):
             video = cv2.VideoCapture(VIDEO_FILE)
             while True:
                 ret, frame = video.read()
@@ -185,15 +186,10 @@ for VIDEO_FILE in tqdm(VIDEO_FILES):
         predictions = predictions.cpu().numpy()
 
         #Make Output Video
-        output_video_path = os.path.join(OUTPUT_FOLDERS, os.path.basename(VIDEO_FILE) + "_generated.avi")
-        # output_video_path = os.path.join(OUTPUT_FOLDERS, os.path.basename(VIDEO_FILE).replace(".dcm", "_generated.avi"))
-        out_avi = cv2.VideoWriter(
-                    output_video_path,
-                    cv2.VideoWriter_fourcc(*"XVID"),
-                    30, #FPS defult
-                    (batch["inputs"].shape[-1], batch["inputs"].shape[-2]),  # Width, Height
-                )
+        output_video_path = os.path.join(OUTPUT_FOLDERS, os.path.basename(VIDEO_FILE) + "_generated.mp4")
+        # output_video_path = os.path.join(OUTPUT_FOLDERS, os.path.basename(VIDEO_FILE).replace(".dcm", "_generated.mp4"))
         
+        video_frames_list = []
         for i, (frame, prediction) in enumerate(zip(input_tensor, predictions)):
             frame = frame.permute(1, 2, 0).cpu().numpy()
             frame = np.clip(frame, 0, 1)
@@ -234,15 +230,22 @@ for VIDEO_FILE in tqdm(VIDEO_FILES):
                 #image_path   m_name  coordinates   type   video_path frame_number    mse  image_shape file_uid    mrn
                 }) 
             
-            out_avi.write(frame)
+            video_frames_list.append(torch.from_numpy(frame))
             
             #make dataframe from results_one_file
             df_results_one_file = pd.DataFrame(results_one_file)
-            
-        out_avi.release()
+        
+        # Write video using torchvision
+        video_tensor = torch.stack(video_frames_list)  # (F, H, W, C)
+        torchvision.io.write_video(
+            filename=output_video_path,
+            video_array=video_tensor,
+            fps=30,
+            video_codec='libx264'
+        )
 
         process_video_with_diameter(video_path = output_video_path, 
-                                output_path = output_video_path.replace(".avi", "_distance.avi"),
+                                output_path = output_video_path.replace(".mp4", "_distance.mp4"),
                                 conversion_factor_X = conversion_factor_X,
                                 conversion_factor_Y = conversion_factor_Y,
                                 df = df_results_one_file,
@@ -272,5 +275,5 @@ print("Completed. Please check the output folder for the generated videos and me
 #--output_path_folders "./OUTPUT/IVS"
 
 #python inference_2D_image_folders.py --model_weights "pa" 
-#--folders "/workspace/yuki/measurements_internal/end_to_end_inference/mpa_videos" 
+#--folders "/workspace/milos/EchoQA/measurements/end_to_end_inference/mpa_videos" 
 #--output_path_folders "./OUTPUT/PA_SFD"
